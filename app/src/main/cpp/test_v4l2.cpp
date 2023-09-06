@@ -19,16 +19,20 @@
 struct buffer {
     void * start;
     unsigned int length;
+};
+
+struct video {
+    buffer * buffers;
     struct v4l2_buffer buf;
     unsigned char n_buffers;
     unsigned char index;
-    bool isStart;
+    bool isStart = false;
     int width = DEF_VIDEO_WIDTH;
     int height = DEF_VIDEO_HEIGHT;
 };
 
 std::mutex mtx;
-std::map<int, buffer *> fmap;
+std::map<int, struct video *> fmap;
 
 #define TAG "v4l2_camera"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
@@ -60,13 +64,18 @@ Java_com_xiaocai_android_1v4l2_V4l2Camera_open(JNIEnv *env, jobject thiz, jstrin
 
     struct buffer *buffers = NULL;
 
-    buffers = (buffer*) malloc(COUNT * sizeof(*buffers));
+    buffers = (struct buffer*) malloc(COUNT * sizeof(struct buffer));
 
     if (!buffers)
     {
         LOGD("oom");
     }
-    fmap[fd] = buffers;
+
+    struct video * _video = NULL;
+    _video = (struct video*) malloc(sizeof(struct video));
+    
+    _video->buffers = buffers;
+    fmap[fd] = _video;
 
     setFd(env, thiz, fd);
 
@@ -113,16 +122,18 @@ Java_com_xiaocai_android_1v4l2_V4l2Camera_close(JNIEnv *env, jobject thiz) {
 
     ioctl(fd, VIDIOC_STREAMOFF, &type);
 
-    struct buffer *buffers = fmap[fd];
-    buffers->isStart = false;
+    struct video *_video = fmap[fd];
+    struct buffer *buffers = _video->buffers;
+    _video->isStart = false;
     fmap.erase(fd);
 
-    for (int i = 0; i < buffers->n_buffers; i++)
+    for (int i = 0; i < _video->n_buffers; i++)
     {
         munmap(buffers[i].start, buffers[i].length);
     }
 
     free(buffers);
+    free(_video);
 
     close(fd);
     fd = -1;
@@ -151,7 +162,8 @@ Java_com_xiaocai_android_1v4l2_V4l2Camera_start(JNIEnv *env, jobject thiz) {
         return;
     }
 
-    struct buffer *buffers = fmap[fd];
+    struct video *_video = fmap[fd];
+    struct buffer *buffers = _video->buffers;
 
     struct v4l2_fmtdesc fmtdesc;
     struct v4l2_format fmt;
@@ -179,8 +191,8 @@ Java_com_xiaocai_android_1v4l2_V4l2Camera_start(JNIEnv *env, jobject thiz) {
 
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
-    fmt.fmt.pix.width = buffers->width;
-    fmt.fmt.pix.height = buffers->height;
+    fmt.fmt.pix.width = _video->width;
+    fmt.fmt.pix.height = _video->height;
     fmt.fmt.pix.field = V4L2_FIELD_INTERLACED;
 
     if (ioctl(fd, VIDIOC_S_FMT, &fmt) == -1)
@@ -211,20 +223,20 @@ Java_com_xiaocai_android_1v4l2_V4l2Camera_start(JNIEnv *env, jobject thiz) {
     }
 
     struct v4l2_buffer buf;
-    for (buffers->n_buffers = 0; buffers->n_buffers < req.count; buffers->n_buffers++)
+    for (_video->n_buffers = 0; _video->n_buffers < req.count; _video->n_buffers++)
     {
         buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
-        buf.index = buffers->n_buffers;
+        buf.index = _video->n_buffers;
 
         if (ioctl(fd, VIDIOC_QUERYBUF, &buf) == -1)
         {
             LOGD("query buffer error");
         }
 
-        buffers[buffers->n_buffers].length = buf.length;
-        buffers[buffers->n_buffers].start = mmap(NULL, buf.length, PROT_READ|PROT_WRITE, MAP_SHARED, fd, buf.m.offset);
-        if (buffers[buffers->n_buffers].start == MAP_FAILED)
+        buffers[_video->n_buffers].length = buf.length;
+        buffers[_video->n_buffers].start = mmap(NULL, buf.length, PROT_READ|PROT_WRITE, MAP_SHARED, fd, buf.m.offset);
+        if (buffers[_video->n_buffers].start == MAP_FAILED)
         {
             LOGD("buffer map error");
         }
@@ -236,14 +248,14 @@ Java_com_xiaocai_android_1v4l2_V4l2Camera_start(JNIEnv *env, jobject thiz) {
     type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     ioctl(fd, VIDIOC_STREAMON, &type);
 
-    for (buffers->index = 0; buffers->index < buffers->n_buffers; ++buffers->index) {
-        buf.index = buffers->index;
+    for (_video->index = 0; _video->index < _video->n_buffers; ++_video->index) {
+        buf.index = _video->index;
         ioctl(fd, VIDIOC_QBUF, &buf);
     }
 
-    buffers->buf = buf;
-    buffers->isStart = true;
-    buffers->index = 0;
+    _video->buf = buf;
+    _video->isStart = true;
+    _video->index = 0;
 }
 
 extern "C"
@@ -255,12 +267,13 @@ Java_com_xiaocai_android_1v4l2_V4l2Camera_frameToBitmap(JNIEnv *env, jobject thi
 
     if (fd != -1)
     {
-        struct buffer *buffers = fmap[fd];
+        struct video *_video = fmap[fd];
+        struct buffer *buffers = _video->buffers;
 
         int ret;
-        buffers->buf.index = buffers->index;
+        _video->buf.index = _video->index;
 
-        ret = ioctl(fd, VIDIOC_DQBUF, &buffers->buf);
+        ret = ioctl(fd, VIDIOC_DQBUF, &_video->buf);
         if (ret == 0)
         {
             void * pixels;
@@ -270,9 +283,9 @@ Java_com_xiaocai_android_1v4l2_V4l2Camera_frameToBitmap(JNIEnv *env, jobject thi
                 LOGD("bitmap lockPixels error");
             }
 
-            unsigned char * src = (unsigned char *) buffers[buffers->buf.index].start;
+            unsigned char * src = (unsigned char *) buffers[_video->buf.index].start;
 
-            int frameSize = buffers->width * buffers->height * 2;
+            int frameSize = _video->width * _video->height * 2;
 
             int * colors = (int *) pixels;
             for (int i = 0; i < frameSize; i+=4)
@@ -304,11 +317,11 @@ Java_com_xiaocai_android_1v4l2_V4l2Camera_frameToBitmap(JNIEnv *env, jobject thi
 
             AndroidBitmap_unlockPixels(env, bitmap);
 
-            ioctl(fd, VIDIOC_QBUF, &buffers->buf);
-            buffers->index++;
-            if (buffers->index >= buffers->n_buffers)
+            ioctl(fd, VIDIOC_QBUF, &_video->buf);
+            _video->index++;
+            if (_video->index >= _video->n_buffers)
             {
-                buffers->index = 0;
+                _video->index = 0;
             }
         }
     }
